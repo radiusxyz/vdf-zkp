@@ -65,7 +65,6 @@ pub struct Param {
   pub prime_word_count: usize,
   pub n_word_count: usize,
 }
-
 pub struct VdfCircuit<E>
 where
   E: Engine,
@@ -116,7 +115,7 @@ where
 
     two_two_t.inputize(cs.namespace(|| "two_two_t"))?;
     g.inputize(cs.namespace(|| "g"))?;
-    y.inputize(cs.namespace(|| "y"))?;
+    n.inputize(cs.namespace(|| "n"))?;
 
     two_two_t.is_equal(cs.namespace(|| "2^{2^t} == q * pi_n + r"), &qpi_n_plus_remainder_big_nat)?;
     y.equal(cs.namespace(|| "y == g^r mod n"), &gr_n)?;
@@ -169,6 +168,7 @@ where
   pub fn import_parameter(&mut self) {
     if Path::new(PARAMETER_FILE_PATH).exists() == false {
       self.setup_parameter();
+      self.export_parameter();
       return;
     }
 
@@ -195,16 +195,16 @@ where
     create_random_proof(circuit, self.params.as_ref().unwrap(), rng).unwrap()
   }
 
-  pub fn verify(&self, proof: Proof<E>, _two_two_t: &str, _g: &str, _y: &str) -> bool {
+  pub fn verify(&self, proof: Proof<E>, _two_two_t: &str, _g: &str, _n: &str) -> bool {
     init_big_uint_from_str!(two_two_t, _two_two_t);
     init_big_uint_from_str!(g, _g);
-    init_big_uint_from_str!(y, _y);
+    init_big_uint_from_str!(n, _n);
 
     let pvk = prepare_verifying_key(&self.params.as_ref().unwrap().vk);
 
     let mut inputs: Vec<<E as ScalarEngine>::Fr> = nat_to_limbs::<<E as ScalarEngine>::Fr>(&two_two_t, self.vdf_param.word_size, self.vdf_param.two_two_t_word_count);
     inputs.extend(nat_to_limbs::<<E as ScalarEngine>::Fr>(&g, self.vdf_param.word_size, self.vdf_param.n_word_count));
-    inputs.extend(nat_to_limbs::<<E as ScalarEngine>::Fr>(&y, self.vdf_param.word_size, self.vdf_param.n_word_count));
+    inputs.extend(nat_to_limbs::<<E as ScalarEngine>::Fr>(&n, self.vdf_param.word_size, self.vdf_param.n_word_count));
 
     verify_proof(&pvk, &proof, &inputs).unwrap()
   }
@@ -215,13 +215,16 @@ mod tests {
   use sapling_crypto::bellman::pairing::bn256::Bn256;
   use std::time::Instant;
 
-  const TWO_TWO_T: &str = "256";
-  const P_MINUS_ONE: &str = "15549753725418749398";
-  const Q_MINUS_ONE: &str = "3639030157899210862";
+  const G: &str = "2";
+  const TWO_TWO_T: &str = "2";
+
+  const P_MINUS_ONE: &str = "2";
+  const Q_MINUS_ONE: &str = "4";
+
   const QUOTIENT: &str = "0";
-  const REMAINDER: &str = "256";
-  const G: &str = "5785640280134906130341721689742675591";
-  const Y: &str = "55566303847478130109743686186659052093";
+  const REMAINDER: &str = "2";
+  const Y: &str = "4";
+  const N: &str = "15";
 
   #[test]
   fn gadget_test_with_setup_parameter() {
@@ -239,7 +242,7 @@ mod tests {
     println!("Create random proof {:?}", duration);
 
     let start = Instant::now();
-    let is_varified = vdf_zkp.verify(proof, TWO_TWO_T, G, Y);
+    let is_varified = vdf_zkp.verify(proof, TWO_TWO_T, G, N);
     let duration = start.elapsed();
     println!("Verify proof {:?} / {:?}", duration, is_varified);
   }
@@ -255,7 +258,7 @@ mod tests {
     println!("Create random proof {:?}", duration);
 
     let start = Instant::now();
-    let is_varified = vdf_zkp.verify(proof, TWO_TWO_T, G, Y);
+    let is_varified = vdf_zkp.verify(proof, TWO_TWO_T, G, N);
     let duration = start.elapsed();
     println!("Verify proof {:?} / {:?}", duration, is_varified);
   }
