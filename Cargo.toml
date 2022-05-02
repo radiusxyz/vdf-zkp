@@ -1,0 +1,17 @@
+[package]
+name = "vdf_zkp"
+version = "0.1.0"
+
+[dependencies]
+rand = "0.4.5"
+hex = "0.4.3"
+time = "0.3.9"
+num-bigint = "0.4.3"
+num-traits = "0.2"
+
+sapling-crypto = { package = "sapling-crypto_ce", git = "https://github.com/matter-labs-archive/sapling-crypto" }
+
+[dev-dependencies]
+quickcheck = "1.0.3"
+quickcheck_macros = "1.0.0"
+color-backtrace = { version = "0.5.1" }
