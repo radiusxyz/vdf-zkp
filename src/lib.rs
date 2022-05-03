@@ -42,20 +42,13 @@ mod test_helpers {
 pub mod bignat;
 pub mod bit;
 pub mod gadget;
+pub mod group;
 pub mod lazy;
 pub mod num;
 pub mod poly;
 pub mod rsa_set;
-// pub mod vdf_interface;
-// pub mod vdf_light;
-// pub mod vdf_no_trapdoor;
-// pub mod vdf_origin;
-// pub mod vdf_origin_trapdoor;
-// pub mod vdf_trapdoor;
 pub mod vdf;
 pub mod wesolowski;
-
-pub mod group;
 
 use num_bigint::BigUint;
 use sapling_crypto::bellman::pairing::ff::{PrimeField, PrimeFieldRepr};
