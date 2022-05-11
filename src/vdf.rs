@@ -1,5 +1,6 @@
 use bignat::nat_to_limbs;
 use bignat::BigNat;
+use mimc;
 use num_bigint::BigUint;
 use poly::Polynomial;
 use rand::thread_rng;
@@ -8,11 +9,9 @@ use sapling_crypto::bellman::pairing::ff::from_hex;
 use sapling_crypto::bellman::pairing::ff::Field;
 use sapling_crypto::bellman::pairing::ff::PrimeField;
 use sapling_crypto::bellman::pairing::ff::ScalarEngine;
-use sapling_crypto::bellman::{Circuit, ConstraintSystem, SynthesisError};
+use sapling_crypto::bellman::{pairing::Engine, Circuit, ConstraintSystem, SynthesisError};
 use sapling_crypto::circuit::boolean::Boolean;
 use sapling_crypto::circuit::num::AllocatedNum;
-use sapling_crypto::poseidon::poseidon_hash;
-use sapling_crypto::poseidon::{PoseidonEngine, QuinticSBox};
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
@@ -30,7 +29,7 @@ macro_rules! init_big_uint_from_str {
 #[derive(Debug)]
 pub struct Input<E>
 where
-  E: PoseidonEngine<SBox = QuinticSBox<E>>,
+  E: Engine,
   E::Fr: PrimeField,
 {
   pub two_two_t: BigUint,
@@ -48,7 +47,7 @@ where
 
 impl<E> Input<E>
 where
-  E: PoseidonEngine<SBox = QuinticSBox<E>>,
+  E: Engine,
   E::Fr: PrimeField,
 {
   pub fn new(commitment: E::Fr, two_two_t: BigUint, p_minus_one: BigUint, q_minus_one: BigUint, quotient: BigUint, remainder: BigUint, g: BigUint, y: BigUint) -> Self {
@@ -69,28 +68,24 @@ where
 pub struct Param {
   pub word_size: usize,
   pub two_two_t_word_count: usize,
-
   pub quotient_word_count: usize,
   pub prime_word_count: usize,
   pub n_word_count: usize,
 }
 pub struct VdfCircuit<E>
 where
-  E: PoseidonEngine<SBox = QuinticSBox<E>>,
-  E::Fr: PrimeField,
+  E: Engine,
 {
   pub inputs: Option<Input<E>>,
   pub params: Param,
-  pub hash_params: E::Params,
 }
 
 impl<E> Circuit<E> for VdfCircuit<E>
 where
-  E: PoseidonEngine<SBox = QuinticSBox<E>>,
+  E: Engine,
   E::Fr: PrimeField,
 {
   fn synthesize<CS: ConstraintSystem<E>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
-    let allocated_commitment = AllocatedNum::alloc(cs.namespace(|| "Allocate commitment"), || Ok(self.inputs.grab()?.commitment))?;
     let two_two_t = BigNat::alloc_from_nat(cs.namespace(|| "2^{2^t}"), || Ok(self.inputs.as_ref().grab()?.two_two_t.clone()), self.params.word_size, self.params.two_two_t_word_count)?;
     let p_minus_one = BigNat::alloc_from_nat(cs.namespace(|| "p-1"), || Ok(self.inputs.as_ref().grab()?.p_minus_one.clone()), self.params.word_size, self.params.prime_word_count)?;
     let q_minus_one = BigNat::alloc_from_nat(cs.namespace(|| "q-1"), || Ok(self.inputs.as_ref().grab()?.q_minus_one.clone()), self.params.word_size, self.params.prime_word_count)?;
@@ -126,13 +121,13 @@ where
 
     let gr_n = g.pow_mod(cs.namespace(|| "g^r mod n"), &remainder, &n)?;
 
-    let expected_commitment: E::Fr = E::Fr::from_str(gr_n.value.clone().unwrap_or(num_bigint::BigUint::default()).to_string().as_str()).unwrap_or(E::Fr::zero());
-    let allocated_expected_commitment = AllocatedNum::alloc(cs.namespace(|| "Allocate expected commitment"), || Ok(expected_commitment))?;
+    let expected_y: E::Fr = E::Fr::from_str(gr_n.value.clone().unwrap_or(num_bigint::BigUint::default()).to_string().as_str()).unwrap_or(E::Fr::zero());
+    let allocated_expected_y = AllocatedNum::alloc(cs.namespace(|| "Allocate y"), || Ok(expected_y))?;
+    
+    let calculated_commitment = mimc::mimc(cs, &[allocated_expected_y.clone(), allocated_expected_y.clone()])?;
 
-    let calculated_commitment = sapling_crypto::circuit::poseidon_hash::poseidon_hash(cs.namespace(|| "Calculate commitment (hash)"), &[allocated_expected_commitment], &self.hash_params)?.pop().unwrap();
-
-    two_two_t.is_equal(cs.namespace(|| "2^{2^t} == q * pi_n + r"), &qpi_n_plus_remainder_big_nat)?;
-    y.equal(cs.namespace(|| "y == g^r mod n"), &gr_n)?;
+    let allocated_commitment = AllocatedNum::alloc(cs.namespace(|| "Allocate commitment"), || Ok(self.inputs.grab()?.commitment))?;
+    let is_same_commitment = AllocatedNum::equals(cs.namespace(|| "Check commitment and MIMC(g^r mod n) / MIMC(y)"), &allocated_commitment, &calculated_commitment)?;
 
     println!("Public inputs");
     println!("two_two_t: {:?}", two_two_t.value);
@@ -151,8 +146,9 @@ where
     println!("calculated_commitment: {:?}", calculated_commitment.get_value());
     println!("");
 
-    let is_same_commitment = AllocatedNum::equals(cs.namespace(|| "Check between expected commitment and calculated commitment (hash(g^r mod n))"), &allocated_commitment, &calculated_commitment)?;
-    Boolean::enforce_equal(cs.namespace(|| "is_same_commitment"), &is_same_commitment, &Boolean::Constant(true))?;
+    two_two_t.is_equal(cs.namespace(|| "2^{2^t} == q * pi_n + r"), &qpi_n_plus_remainder_big_nat)?;
+    y.equal(cs.namespace(|| "y == g^r mod n"), &gr_n)?;
+    Boolean::enforce_equal(cs.namespace(|| "commitment == MIMC(g^r mod n) MIMC(y)"), &is_same_commitment, &Boolean::Constant(true))?;
 
     two_two_t.inputize(cs.namespace(|| "two_two_t"))?;
     g.inputize(cs.namespace(|| "g"))?;
@@ -162,10 +158,9 @@ where
   }
 }
 
-#[derive()]
 pub struct VdfZKP<E>
 where
-  E: PoseidonEngine<SBox = QuinticSBox<E>>,
+  E: Engine,
 {
   vdf_param: Param,
   pub params: Option<Parameters<E>>,
@@ -173,7 +168,7 @@ where
 
 impl<E> VdfZKP<E>
 where
-  E: PoseidonEngine<SBox = QuinticSBox<E>>,
+  E: Engine,
 {
   pub fn new() -> VdfZKP<E> {
     VdfZKP {
@@ -188,11 +183,11 @@ where
     }
   }
 
-  pub fn setup_parameter(&mut self, hash_params: E::Params) {
+  pub fn setup_parameter(&mut self) {
     let rng = &mut thread_rng();
 
     self.params = {
-      let circuit = VdfCircuit::<E> { inputs: None, params: self.vdf_param.clone(), hash_params };
+      let circuit = VdfCircuit::<E> { inputs: None, params: self.vdf_param.clone() };
       Some(generate_random_parameters(circuit, rng).unwrap())
     };
   }
@@ -207,6 +202,9 @@ where
 
   pub fn import_parameter(&mut self) {
     if Path::new(PARAMETER_FILE_PATH).exists() == false {
+      println!("Not exist file.");
+      self.setup_parameter();
+      self.export_parameter();
       return;
     }
 
@@ -214,7 +212,7 @@ where
     self.params = Some(Parameters::read(file, true).unwrap());
   }
 
-  pub fn generate_proof(&self, hash_params: E::Params, _two_two_t: &str, _p_minus_one: &str, _q_minus_one: &str, _quotient: &str, _remainder: &str, _g: &str, _y: &str) -> Proof<E> {
+  pub fn generate_proof(&self, _two_two_t: &str, _p_minus_one: &str, _q_minus_one: &str, _quotient: &str, _remainder: &str, _g: &str, _y: &str) -> Proof<E> {
     init_big_uint_from_str!(two_two_t, _two_two_t);
     init_big_uint_from_str!(p_minus_one, _p_minus_one);
     init_big_uint_from_str!(q_minus_one, _q_minus_one);
@@ -225,13 +223,12 @@ where
 
     let rng = &mut thread_rng();
 
-    let expected_commitment = PrimeField::from_str(_y).unwrap();
-    let commitment = poseidon_hash::<E>(&hash_params, &[expected_commitment])[0];
-
+    let commit = PrimeField::from_str(_y).unwrap();
+    let y_commitment = mimc::helper::mimc(&[commit, commit]);
+    
     let circuit = VdfCircuit::<E> {
-      inputs: Some(Input::new(commitment, two_two_t, p_minus_one, q_minus_one, quotient, remainder, g, y)),
+      inputs: Some(Input::new(y_commitment, two_two_t, p_minus_one, q_minus_one, quotient, remainder, g, y)),
       params: self.vdf_param.clone(),
-      hash_params,
     };
 
     create_random_proof(circuit, self.params.as_ref().unwrap(), rng).unwrap()
@@ -258,10 +255,8 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
-  use sapling_crypto::bellman::pairing::bn256::Bn256;
+  use sapling_crypto::bellman::pairing::bls12_381::Bls12;
   use sapling_crypto::bellman::pairing::ff::to_hex;
-  use sapling_crypto::group_hash::BlakeHasher;
-  use sapling_crypto::poseidon::bn256::Bn256PoseidonParams;
   use std::time::Instant;
 
   const G: &str = "2";
@@ -277,50 +272,45 @@ mod tests {
 
   #[test]
   fn gadget_test_with_setup_parameter() {
-    let mut vdf_zkp = VdfZKP::<Bn256>::new();
+    let mut vdf_zkp = VdfZKP::<Bls12>::new();
     let start = Instant::now();
-    let hash_params = Bn256PoseidonParams::new::<BlakeHasher>();
-    vdf_zkp.setup_parameter(hash_params);
+    vdf_zkp.setup_parameter();
     let duration = start.elapsed();
     println!("Setup {:?}", duration);
 
     vdf_zkp.export_parameter();
 
     let start = Instant::now();
-    let hash_params = Bn256PoseidonParams::new::<BlakeHasher>();
-    let proof = vdf_zkp.generate_proof(hash_params, TWO_TWO_T, P_MINUS_ONE, Q_MINUS_ONE, QUOTIENT, REMAINDER, G, Y);
+    let proof = vdf_zkp.generate_proof(TWO_TWO_T, P_MINUS_ONE, Q_MINUS_ONE, QUOTIENT, REMAINDER, G, Y);
     let duration = start.elapsed();
     println!("Create random proof {:?}", duration);
 
-    let hash_params = Bn256PoseidonParams::new::<BlakeHasher>();
-    let expected_commitment = PrimeField::from_str(Y).unwrap();
-    let commitment = poseidon_hash::<Bn256>(&hash_params, &[expected_commitment])[0];
+    let commit = <Bls12 as ScalarEngine>::Fr::from_str(Y).unwrap();
+    let commitment = mimc::helper::mimc(&[commit, commit]);
     let commitment = to_hex(&commitment);
 
     let start = Instant::now();
-    let is_varified = vdf_zkp.verify(proof, commitment.as_str(), TWO_TWO_T, G, N);
+    let is_varified = vdf_zkp.verify(proof, commitment.to_string().as_str(), TWO_TWO_T, G, N);
     let duration = start.elapsed();
     println!("Verify proof {:?} / {:?}", duration, is_varified);
   }
 
   #[test]
   fn gadget_test_with_load_parameter() {
-    let mut vdf_zkp = VdfZKP::<Bn256>::new();
+    let mut vdf_zkp = VdfZKP::<Bls12>::new();
     vdf_zkp.import_parameter();
 
     let start = Instant::now();
-    let hash_params = Bn256PoseidonParams::new::<BlakeHasher>();
-    let proof = vdf_zkp.generate_proof(hash_params, TWO_TWO_T, P_MINUS_ONE, Q_MINUS_ONE, QUOTIENT, REMAINDER, G, Y);
+    let proof = vdf_zkp.generate_proof(TWO_TWO_T, P_MINUS_ONE, Q_MINUS_ONE, QUOTIENT, REMAINDER, G, Y);
     let duration = start.elapsed();
     println!("Create random proof {:?}", duration);
 
-    let hash_params = Bn256PoseidonParams::new::<BlakeHasher>();
-    let expected_commitment = PrimeField::from_str(Y).unwrap();
-    let commitment = poseidon_hash::<Bn256>(&hash_params, &[expected_commitment])[0];
+    let commit = <Bls12 as ScalarEngine>::Fr::from_str(Y).unwrap();
+    let commitment = mimc::helper::mimc(&[commit, commit]);
     let commitment = to_hex(&commitment);
 
     let start = Instant::now();
-    let is_varified = vdf_zkp.verify(proof, commitment.as_str(), TWO_TWO_T, G, N);
+    let is_varified = vdf_zkp.verify(proof, commitment.to_string().as_str(), TWO_TWO_T, G, N);
     let duration = start.elapsed();
     println!("Verify proof {:?} / {:?}", duration, is_varified);
   }

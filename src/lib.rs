@@ -44,6 +44,7 @@ pub mod bit;
 pub mod gadget;
 pub mod group;
 pub mod lazy;
+pub mod mimc;
 pub mod num;
 pub mod poly;
 pub mod rsa_set;
