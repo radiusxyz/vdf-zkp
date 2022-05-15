@@ -209,7 +209,7 @@ where
     }
 
     let file = std::fs::File::open(PARAMETER_FILE_PATH).expect("File not found");
-    self.params = Some(Parameters::read(file, true).unwrap());
+    self.params = Some(Parameters::read(file, false).unwrap());
   }
 
   pub fn generate_proof(&self, _two_two_t: &str, _p_minus_one: &str, _q_minus_one: &str, _quotient: &str, _remainder: &str, _g: &str, _y: &str) -> Proof<E> {
