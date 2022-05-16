@@ -2,7 +2,6 @@ use bignat::nat_to_limbs;
 use bignat::BigNat;
 use mimc;
 use num_bigint::BigUint;
-use poly::Polynomial;
 use rand::thread_rng;
 use sapling_crypto::bellman::groth16::{create_random_proof, generate_random_parameters, prepare_verifying_key, verify_proof, Parameters, Proof};
 use sapling_crypto::bellman::pairing::ff::from_hex;
@@ -16,9 +15,13 @@ use std::fs;
 use std::path::Path;
 use std::str::FromStr;
 use OptionExt;
-
+use group::{RsaGroup, SemiGroup};
+use f_to_nat;
 const DATA_PATH: &str = "./data";
 const PARAMETER_FILE_PATH: &str = "./data/vdf_zkp_parameter.data";
+
+const BASE: &str = "2";
+const N: &str = "25195908475657893494027183240048398571429282126204032027777137836043662020707595556264018525880784406918290641249515082189298559149176184502808489120072844992687392807287776735971418347270261896375014971824691165077613379859095700097330459748808428401797429100642458691817195118746121515172654632282216869987549182422433637259085141865462043576798423387184774447920739934236584823824281198163815010674810451660377306056201619676256133844143603833904414952634432190114657544454178424020924616515723350778707749817125772467962926386356373289912154831438167899885040445364023527381951378636564391212010397122822120720357";
 
 macro_rules! init_big_uint_from_str {
   ($var:ident, $val:expr) => {
@@ -32,15 +35,8 @@ where
   E: Engine,
   E::Fr: PrimeField,
 {
-  pub two_two_t: BigUint,
-  pub p_minus_one: BigUint,
-  pub q_minus_one: BigUint,
-
-  pub quotient: BigUint,
-  pub remainder: BigUint,
-
-  pub g: BigUint,
-  pub y: BigUint,
+  pub g_s_two_t: BigUint,
+  pub g_s_two_t_plus_one: BigUint,
 
   pub commitment: E::Fr,
 }
@@ -50,28 +46,38 @@ where
   E: Engine,
   E::Fr: PrimeField,
 {
-  pub fn new(commitment: E::Fr, two_two_t: BigUint, p_minus_one: BigUint, q_minus_one: BigUint, quotient: BigUint, remainder: BigUint, g: BigUint, y: BigUint) -> Self {
-    Input {
-      commitment,
-      two_two_t,
-      p_minus_one,
-      q_minus_one,
-      quotient,
-      remainder,
-      g,
-      y,
-    }
+  pub fn new(commitment: E::Fr, g_s_two_t: BigUint, g_s_two_t_plus_one: BigUint) -> Self {
+    Input { commitment, g_s_two_t, g_s_two_t_plus_one }
   }
 }
 
 #[derive(Clone)]
 pub struct Param {
   pub word_size: usize,
-  pub two_two_t_word_count: usize,
-  pub quotient_word_count: usize,
-  pub prime_word_count: usize,
-  pub n_word_count: usize,
+  pub word_count: usize,
+
+  pub g: BigUint,
+  pub g_two_t: BigUint,
+  pub g_two_t_plus_one: BigUint,
+
+  pub n: BigUint,
+  pub base: BigUint,
 }
+
+#[derive(Debug)]
+pub struct SigmaProof {
+  r1: BigUint,
+  r3: BigUint,
+  s1: BigUint,
+  s3: BigUint,
+  k: BigUint,
+}
+
+pub struct VdfProof<E: Engine> {
+  pub snark_proof: Proof<E>,
+  pub sigma_proof: SigmaProof,
+}
+
 pub struct VdfCircuit<E>
 where
   E: Engine,
@@ -86,73 +92,25 @@ where
   E::Fr: PrimeField,
 {
   fn synthesize<CS: ConstraintSystem<E>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
-    let two_two_t = BigNat::alloc_from_nat(cs.namespace(|| "2^{2^t}"), || Ok(self.inputs.as_ref().grab()?.two_two_t.clone()), self.params.word_size, self.params.two_two_t_word_count)?;
-    let p_minus_one = BigNat::alloc_from_nat(cs.namespace(|| "p-1"), || Ok(self.inputs.as_ref().grab()?.p_minus_one.clone()), self.params.word_size, self.params.prime_word_count)?;
-    let q_minus_one = BigNat::alloc_from_nat(cs.namespace(|| "q-1"), || Ok(self.inputs.as_ref().grab()?.q_minus_one.clone()), self.params.word_size, self.params.prime_word_count)?;
+    let g_s_two_t = BigNat::alloc_from_nat(cs.namespace(|| "g^{s*2^t}"), || Ok(self.inputs.as_ref().grab()?.g_s_two_t.clone()), self.params.word_size, self.params.word_count)?;
+    let g_s_two_t_plus_one = BigNat::alloc_from_nat(cs.namespace(|| "g^{s*2^{t+1}}"), || Ok(self.inputs.as_ref().grab()?.g_s_two_t_plus_one.clone()), self.params.word_size, self.params.word_count)?;
 
-    let quotient = BigNat::alloc_from_nat(cs.namespace(|| "quotient"), || Ok(self.inputs.as_ref().grab()?.quotient.clone()), self.params.word_size, self.params.quotient_word_count)?;
-    let remainder = BigNat::alloc_from_nat(cs.namespace(|| "remainder"), || Ok(self.inputs.as_ref().grab()?.remainder.clone()), self.params.word_size, self.params.n_word_count)?;
+    let n = BigNat::alloc_from_nat(cs.namespace(|| "n"), || Ok(self.params.n.clone()), self.params.word_size, self.params.word_count)?;
+    let two = BigNat::alloc_from_nat(cs.namespace(|| "2"), || Ok(BigUint::from(2usize)), 2, 1)?;
 
-    let g = BigNat::alloc_from_nat(cs.namespace(|| "g"), || Ok(self.inputs.as_ref().grab()?.g.clone()), self.params.word_size, self.params.n_word_count)?;
-    let y = BigNat::alloc_from_nat(cs.namespace(|| "y"), || Ok(self.inputs.as_ref().grab()?.y.clone()), self.params.word_size, self.params.n_word_count)?;
+    let calculated_g_s_two_t_plus_one = g_s_two_t.pow_mod(cs.namespace(|| "(g^{s*2^t})^2"), &two, &n)?;
+    println!("calculated_g_s_two_t_plus_one: {:?}", calculated_g_s_two_t_plus_one.value);
 
-    let one = BigNat::alloc_from_nat(cs.namespace(|| "1"), || Ok(BigUint::from(1usize)), 1, 1)?;
+    calculated_g_s_two_t_plus_one.equal(cs.namespace(|| "(g^{s*2^t})^2 == (g^{s*2^{t+1}})"), &g_s_two_t_plus_one)?;
+    g_s_two_t_plus_one.inputize(cs.namespace(|| "g^{s*2^{t+1}}"))?;
 
-    let one_poly = Polynomial::from(one.clone());
-    let p_minus_one_poly = Polynomial::from(p_minus_one.clone());
-    let q_minus_one_poly = Polynomial::from(q_minus_one.clone());
-    let quotient_poly = Polynomial::from(quotient.clone());
-    let remainder_poly = Polynomial::from(remainder.clone());
-    let pi_n_poly = p_minus_one_poly.alloc_product(cs.namespace(|| "(p-1)(q-1) = pi_n(totient)"), &q_minus_one_poly)?;
-
-    let p_poly = Polynomial::from(p_minus_one_poly).sum(&one_poly);
-    let q_poly = Polynomial::from(q_minus_one_poly).sum(&one_poly);
-    let n_poly = p_poly.alloc_product(cs.namespace(|| "pq = n"), &q_poly)?;
-
-    let qpi_n = quotient_poly.alloc_product(cs.namespace(|| "quotient * pi_n(totient)"), &pi_n_poly)?;
-    let qpi_n_plus_remainder = Polynomial::from(qpi_n).sum(&remainder_poly);
-
-    let max_word = BigUint::from(std::cmp::min(p_minus_one.limbs.len(), q_minus_one.limbs.len())) * &p_minus_one.params.max_word * &q_minus_one.params.max_word;
-    let pi_n = BigNat::from_poly(Polynomial::from(pi_n_poly), self.params.word_size, max_word.clone()); // 1: pi&q_minus_one.params.max_word-1n
-    let n = BigNat::from_poly(Polynomial::from(n_poly), self.params.word_size, max_word.clone()); // 1: n
-
-    let max_word = BigUint::from(std::cmp::min(quotient.limbs.len(), pi_n.limbs.len())) * &quotient.params.max_word * &pi_n.params.max_word + &remainder.params.max_word;
-    let qpi_n_plus_remainder_big_nat = BigNat::from_poly(Polynomial::from(qpi_n_plus_remainder), self.params.word_size, max_word);
-
-    let gr_n = g.pow_mod(cs.namespace(|| "g^r mod n"), &remainder, &n)?;
-
-    let expected_y: E::Fr = E::Fr::from_str(gr_n.value.clone().unwrap_or(num_bigint::BigUint::default()).to_string().as_str()).unwrap_or(E::Fr::zero());
-    let allocated_expected_y = AllocatedNum::alloc(cs.namespace(|| "Allocate y"), || Ok(expected_y))?;
-    
-    let calculated_commitment = mimc::mimc(cs, &[allocated_expected_y.clone(), allocated_expected_y.clone()])?;
+    let y: E::Fr = E::Fr::from_str(g_s_two_t.value.clone().unwrap_or(num_bigint::BigUint::default()).to_string().as_str()).unwrap_or(E::Fr::zero());
+    let allocated_y = AllocatedNum::alloc(cs.namespace(|| "Allocate y"), || Ok(y))?;
+    let calculated_commitment = mimc::mimc(cs, &[allocated_y.clone(), allocated_y.clone()])?;
 
     let allocated_commitment = AllocatedNum::alloc(cs.namespace(|| "Allocate commitment"), || Ok(self.inputs.grab()?.commitment))?;
-    let is_same_commitment = AllocatedNum::equals(cs.namespace(|| "Check commitment and MIMC(g^r mod n) / MIMC(y)"), &allocated_commitment, &calculated_commitment)?;
-
-    println!("Public inputs");
-    println!("two_two_t: {:?}", two_two_t.value);
-    println!("g: {:?}", g.value);
-    println!("n (it is calculated in the circuit): {:?}", n.value);
-    println!("allocated_commitment: {:?}", allocated_commitment.get_value());
-    println!("");
-
-    println!("Private inputs");
-    println!("p_minus_one: {:?}", p_minus_one.value);
-    println!("q_minus_one: {:?}", q_minus_one.value);
-    println!("pi_n: {:?}", pi_n.value);
-    println!("quotient: {:?}", quotient.value);
-    println!("remainder: {:?}", remainder.value);
-    println!("y: {:?}", y.value);
-    println!("calculated_commitment: {:?}", calculated_commitment.get_value());
-    println!("");
-
-    two_two_t.is_equal(cs.namespace(|| "2^{2^t} == q * pi_n + r"), &qpi_n_plus_remainder_big_nat)?;
-    y.equal(cs.namespace(|| "y == g^r mod n"), &gr_n)?;
-    Boolean::enforce_equal(cs.namespace(|| "commitment == MIMC(g^r mod n) MIMC(y)"), &is_same_commitment, &Boolean::Constant(true))?;
-
-    two_two_t.inputize(cs.namespace(|| "two_two_t"))?;
-    g.inputize(cs.namespace(|| "g"))?;
-    n.inputize(cs.namespace(|| "n"))?;
+    let is_same_commitment = AllocatedNum::equals(cs.namespace(|| "Check commitment"), &allocated_commitment, &calculated_commitment)?;
+    Boolean::enforce_equal(cs.namespace(|| "Check is_same_commitment is true"), &is_same_commitment, &Boolean::Constant(true))?;
     allocated_commitment.inputize(cs.namespace(|| "commitment"))?;
     Ok(())
   }
@@ -171,14 +129,23 @@ where
   E: Engine,
 {
   pub fn new() -> VdfZKP<E> {
+    let t = 2;
+    let two_t = BigUint::from(2usize);
+
+    let base = BigUint::from_str(BASE).unwrap();
+    let n = BigUint::from_str(N).unwrap();
+    let g = RsaGroup { n: n.clone(), g: base.clone() };
+
     VdfZKP {
       params: None,
       vdf_param: Param {
         word_size: 64,
-        two_two_t_word_count: 4,
-        quotient_word_count: 2,
-        n_word_count: 2,
-        prime_word_count: 1,
+        word_count: 32,
+        g: g.power(&base, &BigUint::from(1usize)),
+        g_two_t: g.power(&base, &two_t.pow(t)),
+        g_two_t_plus_one: g.power(&base, &two_t.pow(t + 1)),
+        n,
+        base,
       },
     }
   }
@@ -212,43 +179,101 @@ where
     self.params = Some(Parameters::read(file, false).unwrap());
   }
 
-  pub fn generate_proof(&self, _two_two_t: &str, _p_minus_one: &str, _q_minus_one: &str, _quotient: &str, _remainder: &str, _g: &str, _y: &str) -> Proof<E> {
-    init_big_uint_from_str!(two_two_t, _two_two_t);
-    init_big_uint_from_str!(p_minus_one, _p_minus_one);
-    init_big_uint_from_str!(q_minus_one, _q_minus_one);
-    init_big_uint_from_str!(quotient, _quotient);
-    init_big_uint_from_str!(remainder, _remainder);
-    init_big_uint_from_str!(g, _g);
-    init_big_uint_from_str!(y, _y);
+  pub fn generate_proof(&self, _g_s_two_t: &str) -> VdfProof<E> {
+    init_big_uint_from_str!(g_s_two_t, _g_s_two_t);
 
+    let rsa_g = RsaGroup { n: self.vdf_param.n.clone(), g: self.vdf_param.base.clone() };
     let rng = &mut thread_rng();
 
-    let commit = PrimeField::from_str(_y).unwrap();
-    let y_commitment = mimc::helper::mimc(&[commit, commit]);
-    
+    // 1. choose random s,r from F
+    let s: u128 = fastrand::u128(..);
+    let r: u128 = fastrand::u128(..);
+
+    let s = BigUint::from(s);
+    let r = BigUint::from(r);
+    println!("1.choose random s, r :{} ,{}", s, r);
+
+    // 2. R_1 <- g^r ; R_3 <- (g^(2^(T+1)))^r
+    let r1 = rsa_g.power(&self.vdf_param.g, &r);
+    let r3 = rsa_g.power(&self.vdf_param.g_two_t_plus_one, &r);
+    println!("2. R_1, R_3 : {:?} , {:?}", r1, r3);
+
+    // 3. c <- H(R_1, R_3) ; k <- r + c * s
+    let r1_fileld = E::Fr::from_str(r1.to_string().as_str()).unwrap();
+    let r3_fileld = E::Fr::from_str(r3.to_string().as_str()).unwrap();
+    let c_fileld: E::Fr = mimc::helper::mimc(&[r1_fileld, r3_fileld]);
+    let c = f_to_nat(&c_fileld);
+    let k = r + c.clone() * s.clone();
+    println!("3. c, k : {}, {}", c, k);
+
+    // 4. S_1 <- g^s ; S_2 <- (g^(2^T))^s ; S_3 <- (g^(2^(T+1)))^s
+    // ** S_1 is an encryption key
+    let s1 = rsa_g.power(&self.vdf_param.g, &s);
+    let s2 = rsa_g.power(&self.vdf_param.g_two_t, &s);
+    let s3 = rsa_g.power(&self.vdf_param.g_two_t_plus_one, &s);
+    println!("4. s1, s_2, s3 : {} , {} , {}", s1, s2, s3);
+
+    let commit = PrimeField::from_str(_g_s_two_t).unwrap();
+    let commitment = mimc::helper::mimc(&[commit, commit]);
+    let two = BigUint::from(2usize);
+    let g_s_two_t_plus_one = rsa_g.power(&g_s_two_t, &two);
+    println!("5. g_s_two_t_plus_one : {}", g_s_two_t_plus_one);
+
     let circuit = VdfCircuit::<E> {
-      inputs: Some(Input::new(y_commitment, two_two_t, p_minus_one, q_minus_one, quotient, remainder, g, y)),
+      inputs: Some(Input::new(commitment, g_s_two_t, g_s_two_t_plus_one)),
       params: self.vdf_param.clone(),
     };
-
-    create_random_proof(circuit, self.params.as_ref().unwrap(), rng).unwrap()
+    VdfProof {
+      snark_proof: create_random_proof(circuit, self.params.as_ref().unwrap(), rng).unwrap(),
+      sigma_proof: SigmaProof { r1, r3, s1, s3, k },
+    }
   }
 
-  pub fn verify(&self, proof: Proof<E>, _commitment: &str, _two_two_t: &str, _g: &str, _n: &str) -> bool {
-    init_big_uint_from_str!(two_two_t, _two_two_t);
-    init_big_uint_from_str!(g, _g);
-    init_big_uint_from_str!(n, _n);
+  pub fn verify(&self, proof: VdfProof<E>, _commitment: &str, _g_s_two_t_plus_one: &str) -> bool {
+    // Verify sigma
+    // 0. parse proof -> R_1, R_3, S_1, S_3, k
+    let sigma_proof = proof.sigma_proof;
+    let rsa_g = RsaGroup { n: self.vdf_param.n.clone(), g: self.vdf_param.base.clone() };
+    let n = self.vdf_param.n.clone();
+    let r1 = sigma_proof.r1;
+    let r3 = sigma_proof.r3;
+    let s1 = sigma_proof.s1;
+    let s3 = sigma_proof.s3;
+    let k = sigma_proof.k;
 
+    let r1_fileld = E::Fr::from_str(r1.to_string().as_str()).unwrap();
+    let r3_fileld = E::Fr::from_str(r3.to_string().as_str()).unwrap();
+    let c_fileld: E::Fr = mimc::helper::mimc(&[r1_fileld, r3_fileld]);
+    let c = f_to_nat(&c_fileld);
+
+    // 2. g_k <- R_1 * S_1^c ; (g_(2^(T+1)))^k = R_3 * S_3^c
+    let s1_c = rsa_g.power(&s1, &c);
+    let g_k_out = (s1_c * r1) % n.clone();
+    let g_k = rsa_g.power(&self.vdf_param.g, &k);
+    println!("g_k : {}", g_k);
+    println!("g_k_out : {}", g_k_out);
+
+    let s3_c = rsa_g.power(&s3, &n);
+
+    let g_t_plus_one_k_out = (s3_c * r3) % n;
+    let g_one_k = rsa_g.power(&self.vdf_param.g_two_t_plus_one, &k);
+    println!("g_k : {}", g_one_k);
+    println!("g_t_plus_one :{}", g_t_plus_one_k_out);
+
+    if (g_one_k == g_t_plus_one_k_out) && (g_k == g_k_out) == false {
+      return false;
+    }
+
+    // Verify snark
+    init_big_uint_from_str!(g_s_two_t_plus_one, _g_s_two_t_plus_one);
     let pvk = prepare_verifying_key(&self.params.as_ref().unwrap().vk);
 
     let commitment = from_hex::<<E as ScalarEngine>::Fr>(_commitment).unwrap();
 
-    let mut inputs: Vec<<E as ScalarEngine>::Fr> = nat_to_limbs::<<E as ScalarEngine>::Fr>(&two_two_t, self.vdf_param.word_size, self.vdf_param.two_two_t_word_count);
-    inputs.extend(nat_to_limbs::<<E as ScalarEngine>::Fr>(&g, self.vdf_param.word_size, self.vdf_param.n_word_count));
-    inputs.extend(nat_to_limbs::<<E as ScalarEngine>::Fr>(&n, self.vdf_param.word_size, self.vdf_param.n_word_count));
+    let mut inputs: Vec<<E as ScalarEngine>::Fr> = nat_to_limbs::<<E as ScalarEngine>::Fr>(&g_s_two_t_plus_one, self.vdf_param.word_size, self.vdf_param.word_count);
     inputs.extend([commitment]);
 
-    verify_proof(&pvk, &proof, &inputs).unwrap()
+    verify_proof(&pvk, &proof.snark_proof, &inputs).unwrap()
   }
 }
 
@@ -259,20 +284,16 @@ mod tests {
   use sapling_crypto::bellman::pairing::ff::to_hex;
   use std::time::Instant;
 
-  const G: &str = "2";
-  const TWO_TWO_T: &str = "2";
-
-  const P_MINUS_ONE: &str = "2";
-  const Q_MINUS_ONE: &str = "4";
-
-  const QUOTIENT: &str = "0";
-  const REMAINDER: &str = "2";
   const Y: &str = "4";
-  const N: &str = "15";
+  const G_S_TWO_T_PLUS_ONE: &str = "16";
 
   #[test]
   fn gadget_test_with_setup_parameter() {
     let mut vdf_zkp = VdfZKP::<Bls12>::new();
+    println!("g: {:?}", vdf_zkp.vdf_param.g);
+    println!("g_two_t: {:?}", vdf_zkp.vdf_param.g_two_t);
+    println!("g_two_t_plus_one: {:?}", vdf_zkp.vdf_param.g_two_t_plus_one);
+
     let start = Instant::now();
     vdf_zkp.setup_parameter();
     let duration = start.elapsed();
@@ -281,7 +302,7 @@ mod tests {
     vdf_zkp.export_parameter();
 
     let start = Instant::now();
-    let proof = vdf_zkp.generate_proof(TWO_TWO_T, P_MINUS_ONE, Q_MINUS_ONE, QUOTIENT, REMAINDER, G, Y);
+    let proof = vdf_zkp.generate_proof(Y);
     let duration = start.elapsed();
     println!("Create random proof {:?}", duration);
 
@@ -290,7 +311,7 @@ mod tests {
     let commitment = to_hex(&commitment);
 
     let start = Instant::now();
-    let is_varified = vdf_zkp.verify(proof, commitment.to_string().as_str(), TWO_TWO_T, G, N);
+    let is_varified = vdf_zkp.verify(proof, commitment.to_string().as_str(), G_S_TWO_T_PLUS_ONE);
     let duration = start.elapsed();
     println!("Verify proof {:?} / {:?}", duration, is_varified);
   }
@@ -301,7 +322,7 @@ mod tests {
     vdf_zkp.import_parameter();
 
     let start = Instant::now();
-    let proof = vdf_zkp.generate_proof(TWO_TWO_T, P_MINUS_ONE, Q_MINUS_ONE, QUOTIENT, REMAINDER, G, Y);
+    let proof = vdf_zkp.generate_proof(Y);
     let duration = start.elapsed();
     println!("Create random proof {:?}", duration);
 
@@ -310,7 +331,7 @@ mod tests {
     let commitment = to_hex(&commitment);
 
     let start = Instant::now();
-    let is_varified = vdf_zkp.verify(proof, commitment.to_string().as_str(), TWO_TWO_T, G, N);
+    let is_varified = vdf_zkp.verify(proof, commitment.to_string().as_str(), G_S_TWO_T_PLUS_ONE);
     let duration = start.elapsed();
     println!("Verify proof {:?} / {:?}", duration, is_varified);
   }
