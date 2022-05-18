@@ -24,7 +24,7 @@ use sapling_crypto::bellman::pairing::ff::to_hex;
 
 const DATA_PATH: &str = "./data";
 const SNARK_PARAMETER_FILE_PATH: &str = "./data/vdf_zkp_snark_parameter.data";
-const SIGMA_PARAMETER_FILE_PATH: &str = "./data/vdf_zkp_sigma_parameter.data";
+const VDF_PARAMETER_FILE_PATH: &str = "./data/vdf_zkp_vdf_parameter.data";
 
 const BASE: &str = "2";
 const N: &str = "25195908475657893494027183240048398571429282126204032027777137836043662020707595556264018525880784406918290641249515082189298559149176184502808489120072844992687392807287776735971418347270261896375014971824691165077613379859095700097330459748808428401797429100642458691817195118746121515172654632282216869987549182422433637259085141865462043576798423387184774447920739934236584823824281198163815010674810451660377306056201619676256133844143603833904414952634432190114657544454178424020924616515723350778707749817125772467962926386356373289912154831438167899885040445364023527381951378636564391212010397122822120720357";
@@ -138,8 +138,6 @@ where
     let calculated_commitment = mimc::mimc(cs, &[allocated_y.clone(), allocated_y.clone()])?;
     let allocated_commitment = AllocatedNum::alloc(cs.namespace(|| "Allocate commitment"), || Ok(self.inputs.grab()?.commitment))?;
     let is_same_commitment = AllocatedNum::equals(cs.namespace(|| "Check commitment"), &allocated_commitment, &calculated_commitment)?;
-    println!("allocated_commitment: {:?}", allocated_commitment.get_value());
-    println!("calculated_commitment: {:?}", calculated_commitment.get_value());
 
     Boolean::enforce_equal(cs.namespace(|| "Check is_same_commitment is true"), &is_same_commitment, &Boolean::Constant(true))?;
 
@@ -206,7 +204,7 @@ where
     let file = std::fs::File::create(SNARK_PARAMETER_FILE_PATH).expect("File creatation is failed");
     self.circuit_params.as_ref().unwrap().write(file).unwrap();
 
-    let file = std::fs::File::create(SIGMA_PARAMETER_FILE_PATH).expect("File creatation is failed");
+    let file = std::fs::File::create(VDF_PARAMETER_FILE_PATH).expect("File creatation is failed");
     serde_json::to_writer(&file, &self.vdf_params).unwrap();
   }
 
@@ -218,7 +216,7 @@ where
       return;
     }
 
-    let file = std::fs::File::open(SIGMA_PARAMETER_FILE_PATH).expect("File creatation is failed");
+    let file = std::fs::File::open(VDF_PARAMETER_FILE_PATH).expect("File creatation is failed");
     self.vdf_params = serde_json::from_reader(&file).unwrap();
 
     let file = std::fs::File::open(SNARK_PARAMETER_FILE_PATH).expect("File not found");
@@ -240,12 +238,10 @@ where
     // 1. choose random r from F
     let r: u128 = fastrand::u128(..);
     let r = BigUint::from(r);
-    println!("1.choose random s, r :{} ,{}", s, r);
 
     // 2. R_1 <- g^r ; R_3 <- (g^(2^(T+1)))^r
     let r1 = rsa_g.power(&g, &r);
     let r3 = rsa_g.power(&g_two_t_plus_one, &r);
-    println!("2. R_1, R_3 : {:?} , {:?}", r1, r3);
 
     // 3. c <- H(R_1, R_3) ; k <- r + c * s
     let r1_fileld = E::Fr::from_str(r1.to_string().as_str()).unwrap();
@@ -253,15 +249,12 @@ where
     let c_fileld: E::Fr = mimc::helper::mimc(&[r1_fileld, r3_fileld]);
     let c = f_to_nat(&c_fileld);
     let k = r + c.clone() * s.clone();
-    println!("3. c, k : {}, {}", c, k);
 
     // 4. S_1 <- g^s ; S_2 <- (g^(2^T))^s ; S_3 <- (g^(2^(T+1)))^s
     // ** S_1 is an encryption key
     let s1 = rsa_g.power(&g, &s);
     let s2 = rsa_g.power(&g_two_t, &s);
     let s3 = rsa_g.power(&g_two_t_plus_one, &s);
-    println!("4. s1, s_2, s3 : {} , {} , {}", s1, s2, s3);
-    println!("prove - commitment: {:?}", commitment);
 
     let circuit = VdfCircuit::<E> {
       inputs: Some(VdfInput::new(to_hex(&commitment).as_str(), s2.to_string().as_str(), s3.to_string().as_str())),
@@ -308,14 +301,10 @@ where
     let s1_c = rsa_g.power(&s1, &c);
     let g_k_out = (s1_c * r1) % n.clone();
     let g_k = rsa_g.power(&g, &k);
-    println!("g_k : {}", g_k);
-    println!("g_k_out : {}", g_k_out);
 
     let s3_c = rsa_g.power(&s3, &n);
     let g_t_plus_one_k_out = (s3_c * r3) % n;
     let g_one_k = rsa_g.power(&g_two_t_plus_one, &k);
-    println!("g_k : {}", g_one_k);
-    println!("g_t_plus_one :{}", g_t_plus_one_k_out);
 
     if (g_one_k == g_t_plus_one_k_out) && (g_k == g_k_out) == false {
       return false;
@@ -324,8 +313,6 @@ where
     // Verify snark
     let pvk = prepare_verifying_key(&self.circuit_params.as_ref().unwrap().vk);
 
-    println!("s3: {:?}", s3);
-    println!("commitment: {:?}", commitment);
     let mut inputs: Vec<<E as ScalarEngine>::Fr> = nat_to_limbs::<<E as ScalarEngine>::Fr>(&s3, vdf_params.word_size, vdf_params.word_count);
     inputs.extend([commitment]);
 
