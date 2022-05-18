@@ -55,6 +55,7 @@ use num_bigint::BigUint;
 use sapling_crypto::bellman::pairing::ff::{PrimeField, PrimeFieldRepr};
 use sapling_crypto::bellman::SynthesisError;
 
+pub use vdf::VdfProof;
 pub use vdf::VdfZKP;
 
 trait OptionExt<T> {
@@ -72,7 +73,7 @@ impl<T> OptionExt<T> for Option<T> {
 }
 
 /// Convert a field element to a natural number
-fn f_to_nat<F: PrimeField>(f: &F) -> BigUint {
+pub fn f_to_nat<F: PrimeField>(f: &F) -> BigUint {
   let mut s = Vec::new();
   f.into_repr().write_be(&mut s).unwrap();
   BigUint::from_bytes_be(&s)
@@ -80,7 +81,7 @@ fn f_to_nat<F: PrimeField>(f: &F) -> BigUint {
 
 /// Convert a natural number to a field element.
 /// Returns `None` if the number is too big for the field.
-fn nat_to_f<F: PrimeField>(n: &BigUint) -> Option<F> {
+pub fn nat_to_f<F: PrimeField>(n: &BigUint) -> Option<F> {
   F::from_str(&format!("{}", n))
 }
 
