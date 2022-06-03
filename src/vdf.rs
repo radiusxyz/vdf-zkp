@@ -22,9 +22,9 @@ use self::serde::{Deserialize, Serialize};
 use sapling_crypto::bellman::pairing::ff::from_hex;
 use sapling_crypto::bellman::pairing::ff::to_hex;
 
-const DATA_PATH: &str = "./data";
-const SNARK_PARAMETER_FILE_PATH: &str = "./data/vdf_zkp_snark_parameter.data";
-const VDF_PARAMETER_FILE_PATH: &str = "./data/vdf_zkp_vdf_parameter.data";
+const DATA_PATH: &str = "/data";
+const SNARK_PARAMETER_FILE_PATH: &str = "/vdf_zkp_snark_parameter.data";
+const VDF_PARAMETER_FILE_PATH: &str = "/vdf_zkp_vdf_parameter.data";
 
 const BASE: &str = "2";
 const N: &str = "25195908475657893494027183240048398571429282126204032027777137836043662020707595556264018525880784406918290641249515082189298559149176184502808489120072844992687392807287776735971418347270261896375014971824691165077613379859095700097330459748808428401797429100642458691817195118746121515172654632282216869987549182422433637259085141865462043576798423387184774447920739934236584823824281198163815010674810451660377306056201619676256133844143603833904414952634432190114657544454178424020924616515723350778707749817125772467962926386356373289912154831438167899885040445364023527381951378636564391212010397122822120720357";
@@ -165,8 +165,7 @@ where
 
   pub fn setup_parameter(&mut self) {
     // Setup - snark parameters
-    // let t = 1048576; // TODO: Change the t value / 8388608
-    let t = 2;
+    let t = 2; // TODO: Change the t value / 8388608
     let two = BigUint::from(2usize);
 
     let base = BigUint::from_str(BASE).unwrap();
@@ -198,28 +197,49 @@ where
   }
 
   pub fn export_parameter(&self) {
-    if fs::create_dir_all(DATA_PATH).is_ok() == false {
+    let exe = std::env::current_exe().unwrap();
+    let mut data_dir_path = exe.parent().expect("Executable must be in some directory").to_str().unwrap().to_owned();
+    data_dir_path.push_str(DATA_PATH);
+    
+    let mut snark_parameter_file_path = data_dir_path.clone();
+    snark_parameter_file_path.push_str(SNARK_PARAMETER_FILE_PATH);
+
+    let mut vdf_parameter_file_path = data_dir_path.clone();
+    vdf_parameter_file_path.push_str(VDF_PARAMETER_FILE_PATH);
+
+    if fs::create_dir_all(data_dir_path).is_ok() == false {
       return;
     };
-    let file = std::fs::File::create(SNARK_PARAMETER_FILE_PATH).expect("File creatation is failed");
+    
+    let file = std::fs::File::create(snark_parameter_file_path).expect("File creatation is failed");
     self.circuit_params.as_ref().unwrap().write(file).unwrap();
 
-    let file = std::fs::File::create(VDF_PARAMETER_FILE_PATH).expect("File creatation is failed");
+    let file = std::fs::File::create(vdf_parameter_file_path).expect("File creatation is failed");
     serde_json::to_writer(&file, &self.vdf_params).unwrap();
   }
 
   pub fn import_parameter(&mut self) {
-    if Path::new(SNARK_PARAMETER_FILE_PATH).exists() == false {
+    let exe = std::env::current_exe().unwrap();
+    let mut data_dir_path = exe.parent().expect("Executable must be in some directory").to_str().unwrap().to_owned();
+    data_dir_path.push_str(DATA_PATH);
+    
+    let mut snark_parameter_file_path = data_dir_path.clone();
+    snark_parameter_file_path.push_str(SNARK_PARAMETER_FILE_PATH);
+
+    let mut vdf_parameter_file_path = data_dir_path.clone();
+    vdf_parameter_file_path.push_str(VDF_PARAMETER_FILE_PATH);
+
+    if Path::new(&snark_parameter_file_path.as_str()).exists() == false {
       println!("Not exist file.");
       self.setup_parameter();
       self.export_parameter();
       return;
     }
 
-    let file = std::fs::File::open(VDF_PARAMETER_FILE_PATH).expect("File creatation is failed");
+    let file = std::fs::File::open(vdf_parameter_file_path).expect("File creatation is failed");
     self.vdf_params = serde_json::from_reader(&file).unwrap();
 
-    let file = std::fs::File::open(SNARK_PARAMETER_FILE_PATH).expect("File not found");
+    let file = std::fs::File::open(snark_parameter_file_path).expect("File not found");
     self.circuit_params = Some(Parameters::read(file, false).unwrap());
   }
 
